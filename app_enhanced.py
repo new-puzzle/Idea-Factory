@@ -107,24 +107,12 @@ def delete_from_history(idea_id):
     c.execute("DELETE FROM ideas WHERE id = ?", (idea_id,))
     conn.commit()
 
-def get_history_items(category_filter=None, search_term=None):
+def get_history_items(category_filter=None):
     c = conn.cursor()
-    query = "SELECT * FROM ideas WHERE 1=1"
-    params = []
-    
-    # Add category filter
     if category_filter and category_filter != "All":
-        query += " AND category = ?"
-        params.append(category_filter)
-    
-    # Add search filter (searches in both content and topic)
-    if search_term and search_term.strip():
-        query += " AND (content LIKE ? OR topic LIKE ?)"
-        search_pattern = f"%{search_term.strip()}%"
-        params.extend([search_pattern, search_pattern])
-    
-    query += " ORDER BY created_at DESC"
-    c.execute(query, params)
+        c.execute("SELECT * FROM ideas WHERE category = ? ORDER BY created_at DESC", (category_filter,))
+    else:
+        c.execute("SELECT * FROM ideas ORDER BY created_at DESC")
     return c.fetchall()
 
 # --- 3. AI ENGINE (The Brains) ---
@@ -275,23 +263,10 @@ if 'category' not in st.session_state: st.session_state.category = "general"
 # Sidebar History
 with st.sidebar:
     st.header("📚 History")
+    cat_filter = st.selectbox("Filter", ["All", "work", "learning", "creative", "task", "general"])
+    history = get_history_items(cat_filter)
     
-    # Search input
-    search_query = st.text_input("🔍 Search ideas", placeholder="Type to search...", key="history_search")
-    
-    # Category filter
-    cat_filter = st.selectbox("Filter by category", ["All", "work", "learning", "creative", "task", "general"])
-    
-    # Get filtered history
-    history = get_history_items(cat_filter, search_query)
-    
-    # Show result count or empty state
-    if search_query and search_query.strip():
-        if not history:
-            st.caption(f"🔍 No ideas found matching '{search_query}'")
-        else:
-            st.caption(f"🔍 Found {len(history)} result(s)")
-    elif not history:
+    if not history:
         st.caption("No saved ideas yet.")
         
     for item in history:
