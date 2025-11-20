@@ -77,16 +77,31 @@ if 'visualization' not in st.session_state:
     st.session_state.visualization = None
 if 'topic' not in st.session_state:
     st.session_state.topic = ""
+if 'category' not in st.session_state:
+    st.session_state.category = "general"
 
 # Initialize Anthropic client (for direct API calls instead of backend)
 client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
 
-def generate_ideas(topic):
+def generate_ideas(topic, category="general"):
     """Generate ideas using Claude API directly"""
     try:
         with st.spinner("🧠 Generating novel ideas..."):
+            # Category-specific guidance
+            category_guidance = {
+                "work": "Focus on business applications, professional projects, workplace solutions, and career-related opportunities.",
+                "learning": "Focus on educational approaches, learning methods, teaching tools, and knowledge acquisition strategies.",
+                "creative": "Focus on artistic projects, creative expressions, design concepts, and innovative artistic endeavors.",
+                "task": "Focus on practical tasks, actionable projects, step-by-step implementations, and concrete activities.",
+                "general": "Focus on novel cross-disciplinary approaches across all domains."
+            }
+            
+            guidance = category_guidance.get(category, category_guidance["general"])
+            
             prompt = f"""Generate 10 creative, actionable ideas combining {topic}.
+Category focus: {category.upper()} - {guidance}
+
 Each idea should be unique, specific, and formatted as a bullet point.
 Avoid generic suggestions. Focus on novel cross-disciplinary approaches.
 
@@ -203,6 +218,21 @@ with tab1:
         placeholder="artificial intelligence + gardening",
         help="Combine different concepts with '+' for cross-disciplinary ideas"
     )
+    
+    category = st.selectbox(
+        "What type of ideas are you looking for?",
+        options=["general", "work", "learning", "creative", "task"],
+        format_func=lambda x: {
+            "general": "🎯 General (all types)",
+            "work": "💼 Work/Business",
+            "learning": "📚 Learning/Education",
+            "creative": "🎨 Creative/Artistic",
+            "task": "✅ Task/Project"
+        }[x],
+        index=["general", "work", "learning", "creative", "task"].index(st.session_state.category),
+        help="Choose the focus area for idea generation"
+    )
+    st.session_state.category = category
 
     col1, col2 = st.columns([3, 1])
 
@@ -210,7 +240,7 @@ with tab1:
         if st.button("✨ Generate Ideas", type="primary", use_container_width=True):
             if topic:
                 st.session_state.topic = topic
-                ideas = generate_ideas(topic)
+                ideas = generate_ideas(topic, category)
                 if ideas:
                     st.session_state.ideas = ideas
                     st.session_state.selected_idea = None
@@ -243,7 +273,7 @@ with tab1:
         with cols[idx % 2]:
             if st.button(f"📌 {example}", key=f"ex_{idx}", use_container_width=True):
                 st.session_state.topic = example
-                ideas = generate_ideas(example)
+                ideas = generate_ideas(example, st.session_state.category)
                 if ideas:
                     st.session_state.ideas = ideas
                     st.success("Ideas generated! Check the Results tab.")
