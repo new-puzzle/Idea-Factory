@@ -6,6 +6,7 @@ Combines the original Visualization/UI flow with the new Database and Advanced P
 import streamlit as st
 import os
 import sqlite3
+import json
 from datetime import datetime
 from anthropic import Anthropic
 
@@ -197,37 +198,84 @@ BAD EXAMPLE: {cfg['bad']}
 CONSTRAINTS:
 1. Specific mechanism of action required.
 2. No generic buzzwords.
-3. Format: - Idea Title: Description
+3. Return ONLY valid JSON in this exact format:
+{{
+  "ideas": [
+    "Idea Title: Description",
+    "Idea Title: Description"
+  ]
+}}
 """
             message = client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model="claude-haiku-20240307",  # Using Haiku for faster/cheaper generation
                 max_tokens=1024,
                 messages=[{"role": "user", "content": prompt}]
             )
-            text = message.content[0].text
-            # Robust parsing
-            ideas = [line.strip()[1:].strip() for line in text.split('\n') if line.strip().startswith('-')]
-            if not ideas: ideas = [l.strip() for l in text.split('\n') if len(l) > 10]
-            return ideas[:5]
+            text = message.content[0].text.strip()
+            
+            # Try to extract JSON from response
+            try:
+                # Remove markdown code blocks if present
+                if "```json" in text:
+                    text = text.split("```json")[1].split("```")[0].strip()
+                elif "```" in text:
+                    text = text.split("```")[1].split("```")[0].strip()
+                
+                data = json.loads(text)
+                ideas = data.get("ideas", [])
+                return ideas[:5] if ideas else []
+            except json.JSONDecodeError:
+                # Fallback to old parsing if JSON fails
+                ideas = [line.strip()[1:].strip() for line in text.split('\n') if line.strip().startswith('-')]
+                if not ideas: 
+                    ideas = [l.strip() for l in text.split('\n') if len(l) > 10]
+                return ideas[:5]
     except Exception as e:
         st.error(f"Error: {str(e)}")
         return []
 
-def refine_idea(idea, category):
+def refine_idea(idea, category, conversation_history=None, follow_up=None):
     if not client: return None
     try:
         with st.spinner("✨ Creating strategic plan..."):
             cfg = get_category_config(category)
-            prompt = f"""
+            
+            # Build messages with conversation history for iterative refinement
+            messages = []
+            
+            if conversation_history:
+                # If we have history, this is a follow-up refinement
+                messages.extend(conversation_history)
+                if follow_up:
+                    prompt = f"""
+{cfg['role']}
+Based on the previous plan, here's a follow-up request: {follow_up}
+
+Please update the plan accordingly. Output a Markdown table: Phase | Critical Task | The Trap (Risk) | Resource
+Follow with a paragraph: "The Secret Sauce".
+"""
+                else:
+                    prompt = f"""
+{cfg['role']}
+Please refine the plan further based on our conversation.
+Output a Markdown table: Phase | Critical Task | The Trap (Risk) | Resource
+Follow with a paragraph: "The Secret Sauce".
+"""
+            else:
+                # Initial refinement
+                prompt = f"""
 {cfg['role']}
 Critique and plan this idea: "{idea}"
 Output a Markdown table: Phase | Critical Task | The Trap (Risk) | Resource
 Follow with a paragraph: "The Secret Sauce".
 """
+            
+            messages.append({"role": "user", "content": prompt})
+            
             message = client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model="claude-sonnet-4-20250514",  # Using Sonnet for complex refinement
                 max_tokens=2048,
-                messages=[{"role": "user", "content": prompt}]
+                messages=messages
             )
             return message.content[0].text
     except Exception as e:
@@ -271,6 +319,10 @@ if 'refined_plan' not in st.session_state: st.session_state.refined_plan = None
 if 'visualization' not in st.session_state: st.session_state.visualization = None
 if 'topic' not in st.session_state: st.session_state.topic = ""
 if 'category' not in st.session_state: st.session_state.category = "general"
+if 'editing_idea_idx' not in st.session_state: st.session_state.editing_idea_idx = None
+if 'edited_idea_text' not in st.session_state: st.session_state.edited_idea_text = ""
+if 'refinement_history' not in st.session_state: st.session_state.refinement_history = []
+if 'refinement_chat' not in st.session_state: st.session_state.refinement_chat = []
 
 # Sidebar History
 with st.sidebar:
@@ -368,29 +420,139 @@ with tab2:
         st.markdown(f"### Ideas for: {st.session_state.topic}")
         for idx, idea in enumerate(st.session_state.ideas):
             with st.container():
-                st.markdown(f"<div class='idea-card'>{idea}</div>", unsafe_allow_html=True)
-                c1, c2 = st.columns([1, 4])
-                with c1:
-                    if st.button("💾 Save", key=f"save_{idx}"):
-                        if save_to_history(st.session_state.topic, st.session_state.category, idea, st.session_state.refined_plan):
-                            st.toast("Saved!", icon="💾")
-                        else:
-                            st.toast("Already saved.", icon="⚠️")
-                with c2:
-                    if st.button("Refine ➤", key=f"ref_{idx}"):
-                        st.session_state.selected_idea = idea
-                        plan = refine_idea(idea, st.session_state.category)
-                        if plan:
-                            st.session_state.refined_plan = plan
-                            st.success("Refined! Check Refinement tab.")
+                # Check if this idea is being edited
+                if st.session_state.editing_idea_idx == idx:
+                    edited = st.text_area(
+                        "Edit idea:",
+                        value=st.session_state.edited_idea_text,
+                        key=f"edit_text_{idx}",
+                        height=100
+                    )
+                    col_edit1, col_edit2 = st.columns(2)
+                    with col_edit1:
+                        if st.button("✅ Save", key=f"save_edit_{idx}"):
+                            st.session_state.ideas[idx] = edited
+                            st.session_state.editing_idea_idx = None
+                            st.session_state.edited_idea_text = ""
+                            st.rerun()
+                    with col_edit2:
+                        if st.button("❌ Cancel", key=f"cancel_edit_{idx}"):
+                            st.session_state.editing_idea_idx = None
+                            st.session_state.edited_idea_text = ""
+                            st.rerun()
+                else:
+                    st.markdown(f"<div class='idea-card'>{idea}</div>", unsafe_allow_html=True)
+                    col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
+                    with col1:
+                        if st.button("💾 Save", key=f"save_{idx}"):
+                            if save_to_history(st.session_state.topic, st.session_state.category, idea, st.session_state.refined_plan):
+                                st.toast("Saved!", icon="💾")
+                            else:
+                                st.toast("Already saved.", icon="⚠️")
+                    with col2:
+                        if st.button("✏️ Edit", key=f"edit_{idx}"):
+                            st.session_state.editing_idea_idx = idx
+                            st.session_state.edited_idea_text = idea
+                            st.rerun()
+                    with col3:
+                        if st.button("🔄 Regenerate", key=f"regen_{idx}"):
+                            with st.spinner("Regenerating this idea..."):
+                                new_ideas = generate_ideas(st.session_state.topic, st.session_state.category)
+                                if new_ideas and len(new_ideas) > 0:
+                                    st.session_state.ideas[idx] = new_ideas[0]
+                                    st.toast("Idea regenerated!", icon="🔄")
+                                    st.rerun()
+                    with col4:
+                        if st.button("Refine ➤", key=f"ref_{idx}"):
+                            st.session_state.selected_idea = idea
+                            st.session_state.refinement_history = []
+                            st.session_state.refinement_chat = []
+                            plan = refine_idea(idea, st.session_state.category)
+                            if plan:
+                                st.session_state.refined_plan = plan
+                                st.session_state.refinement_history.append({
+                                    "role": "assistant",
+                                    "content": plan
+                                })
+                                # Store initial plan in chat for iterative refinement
+                                st.session_state.refinement_chat.append({
+                                    "role": "assistant",
+                                    "content": plan
+                                })
+                                st.success("Refined! Check Refinement tab.")
+            st.markdown("---")
     else:
         st.info("Generate ideas in the Home tab first.")
 
-# Tab 3: Refinement
+# Tab 3: Refinement (with Iterative Chat)
 with tab3:
     if st.session_state.refined_plan:
         st.markdown(f"### Strategic Plan: {st.session_state.selected_idea}")
         st.markdown(st.session_state.refined_plan)
+        
+        # Iterative refinement chat
+        st.markdown("---")
+        st.markdown("### 💬 Refine Further")
+        st.caption("Ask questions or request changes to improve the plan (e.g., 'Make it cheaper', 'Focus more on marketing', 'Add timeline')")
+        
+        # Display chat history
+        if st.session_state.refinement_chat:
+            st.markdown("#### Conversation History")
+            for chat_item in st.session_state.refinement_chat:
+                if chat_item["role"] == "user":
+                    st.markdown(f"**You:** {chat_item['content']}")
+                else:
+                    st.markdown(f"**AI:** {chat_item['content']}")
+                st.markdown("---")
+        
+        # Chat input
+        user_input = st.text_input("Ask a question or request changes:", key="refinement_input")
+        col_ref1, col_ref2 = st.columns([1, 4])
+        with col_ref1:
+            if st.button("💬 Send", key="send_refinement"):
+                if user_input:
+                    # Add user message to chat
+                    st.session_state.refinement_chat.append({
+                        "role": "user",
+                        "content": user_input
+                    })
+                    
+                    # Build conversation history for API (include all previous messages including assistant responses)
+                    conversation_history = []
+                    # Add all previous chat messages (both user and assistant)
+                    for chat in st.session_state.refinement_chat[:-1]:  # All except the last user message
+                        conversation_history.append({
+                            "role": chat["role"],
+                            "content": chat["content"]
+                        })
+                    
+                    # Get refined response
+                    with st.spinner("Refining plan..."):
+                        refined_response = refine_idea(
+                            st.session_state.selected_idea,
+                            st.session_state.category,
+                            conversation_history=conversation_history,
+                            follow_up=user_input
+                        )
+                        
+                        if refined_response:
+                            st.session_state.refined_plan = refined_response
+                            st.session_state.refinement_chat.append({
+                                "role": "assistant",
+                                "content": refined_response
+                            })
+                            st.session_state.refinement_history.append({
+                                "role": "assistant",
+                                "content": refined_response
+                            })
+                            st.rerun()
+        
+        with col_ref2:
+            if st.button("🔄 Reset Chat", key="reset_chat"):
+                st.session_state.refinement_chat = []
+                st.session_state.refinement_history = []
+                st.rerun()
+        
         st.download_button("Download Plan", st.session_state.refined_plan, "plan.md")
     elif st.session_state.selected_idea:
         st.warning("Idea selected but no plan generated. Click 'Refine' in Results tab.")
